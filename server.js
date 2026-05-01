@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { EC2Client, DescribeInstancesCommand, StartInstancesCommand, StopInstancesCommand } = require('@aws-sdk/client-ec2');
 const path = require('path');
 
 const app = express();
@@ -12,7 +12,7 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static('public'));
 
-const s3Client = new S3Client({
+const ec2Client = new EC2Client({
   region: process.env.AWS_REGION || 'us-east-1',
   credentials: {
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
@@ -20,32 +20,57 @@ const s3Client = new S3Client({
   }
 });
 
-app.post('/api/register', async (req, res) => {
+// Get all EC2 instances
+app.get('/api/instances', async (req, res) => {
   try {
-    const { name, email, phone, address } = req.body;
-    const timestamp = Date.now();
-    const fileName = `registration_${timestamp}.json`;
+    const command = new DescribeInstancesCommand({});
+    const data = await ec2Client.send(command);
 
-    const registrationData = {
-      name,
-      email,
-      phone,
-      address,
-      registeredAt: new Date().toISOString()
-    };
-
-    const command = new PutObjectCommand({
-      Bucket: process.env.S3_BUCKET_NAME,
-      Key: fileName,
-      Body: JSON.stringify(registrationData, null, 2),
-      ContentType: 'application/json'
+    const instances = [];
+    data.Reservations.forEach(reservation => {
+      reservation.Instances.forEach(instance => {
+        instances.push({
+          instanceId: instance.InstanceId,
+          instanceType: instance.InstanceType,
+          state: instance.State.Name,
+          publicIp: instance.PublicIpAddress || 'N/A',
+          privateIp: instance.PrivateIpAddress || 'N/A',
+          name: (instance.Tags?.find(t => t.Key === 'Name')?.Value) || 'Unnamed',
+          launchTime: instance.LaunchTime
+        });
+      });
     });
 
-    await s3Client.send(command);
-    res.json({ success: true, message: 'Registration saved successfully!', fileName });
+    res.json({ success: true, instances });
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ success: false, message: 'Failed to save registration', error: error.message });
+    res.status(500).json({ success: false, message: 'Failed to fetch instances', error: error.message });
+  }
+});
+
+// Start an EC2 instance
+app.post('/api/instances/start', async (req, res) => {
+  try {
+    const { instanceId } = req.body;
+    const command = new StartInstancesCommand({ InstanceIds: [instanceId] });
+    await ec2Client.send(command);
+    res.json({ success: true, message: `Instance ${instanceId} is starting.` });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ success: false, message: 'Failed to start instance', error: error.message });
+  }
+});
+
+// Stop an EC2 instance
+app.post('/api/instances/stop', async (req, res) => {
+  try {
+    const { instanceId } = req.body;
+    const command = new StopInstancesCommand({ InstanceIds: [instanceId] });
+    await ec2Client.send(command);
+    res.json({ success: true, message: `Instance ${instanceId} is stopping.` });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ success: false, message: 'Failed to stop instance', error: error.message });
   }
 });
 
